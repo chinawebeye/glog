@@ -550,11 +550,6 @@ func (l *loggingT) header(s severity, depth int) (*buffer, string, int) {
 
 // formatHeader formats a log header using the provided file name and line number.
 func (l *loggingT) formatHeader(s severity, file string, line int) *buffer {
-
-	if s == statisLog {
-		return l.formatStatisHeader()
-	}
-
 	now := timeNow()
 	if line < 0 {
 		line = 0 // not a real line number, but acceptable to someDigits
@@ -590,48 +585,6 @@ func (l *loggingT) formatHeader(s severity, file string, line int) *buffer {
 	buf.tmp[n+1] = ']'
 	buf.tmp[n+2] = ' '
 	buf.Write(buf.tmp[:n+3])
-	return buf
-}
-
-func (l *loggingT) formatStatisHeader() *buffer {
-	now := timeNow()
-	buf := l.getBuffer()
-
-	// Avoid Fprintf, for speed. The format is so simple that we can do it quickly by hand.
-	// It's worth about 3X. Fprintf is hard.
-	year, month, day := now.Date()
-	hour, minute, second := now.Clock()
-	// [yyyy-mm-dd hh:mm:ss]
-	i := 0
-	buf.tmp[i] = '['
-	i += 1
-	buf.nDigits(4, i, int(year), '0')
-	i += 4
-	buf.tmp[i] = '-'
-	i += 1
-	buf.twoDigits(i, int(month))
-	i += 2
-	buf.tmp[i] = '-'
-	i += 1
-	buf.twoDigits(i, day)
-	i += 2
-	buf.tmp[i] = ' '
-	i += 1
-	buf.twoDigits(i, hour)
-	i += 2
-	buf.tmp[i] = ':'
-	i += 1
-	buf.twoDigits(i, minute)
-	i += 2
-	buf.tmp[i] = ':'
-	i += 1
-	buf.twoDigits(i, second)
-	i += 2
-	buf.tmp[i] = ']'
-	i += 1
-	buf.tmp[i] = ' '
-	i += 1
-	buf.Write(buf.tmp[:i])
 	return buf
 }
 
@@ -677,7 +630,14 @@ func (buf *buffer) someDigits(i, d int) int {
 }
 
 func (l *loggingT) println(s severity, args ...interface{}) {
-	buf, file, line := l.header(s, 0)
+	var buf *buffer
+	var file string
+	var line int
+	if s == statisLog {
+		buf, file, line = l.statisHeader(s, 0)
+	} else {
+		buf, file, line = l.header(s, 0)
+	}
 	fmt.Fprintln(buf, args...)
 	l.output(s, buf, file, line, false)
 }
@@ -687,7 +647,14 @@ func (l *loggingT) print(s severity, args ...interface{}) {
 }
 
 func (l *loggingT) printDepth(s severity, depth int, args ...interface{}) {
-	buf, file, line := l.header(s, depth)
+	var buf *buffer
+	var file string
+	var line int
+	if s == statisLog {
+		buf, file, line = l.statisHeader(s, depth)
+	} else {
+		buf, file, line = l.header(s, depth)
+	}
 	fmt.Fprint(buf, args...)
 	if buf.Bytes()[buf.Len()-1] != '\n' {
 		buf.WriteByte('\n')
@@ -696,7 +663,14 @@ func (l *loggingT) printDepth(s severity, depth int, args ...interface{}) {
 }
 
 func (l *loggingT) printf(s severity, format string, args ...interface{}) {
-	buf, file, line := l.header(s, 0)
+	var buf *buffer
+	var file string
+	var line int
+	if s == statisLog {
+		buf, file, line = l.statisHeader(s, 0)
+	} else {
+		buf, file, line = l.header(s, 0)
+	}
 	fmt.Fprintf(buf, format, args...)
 	if buf.Bytes()[buf.Len()-1] != '\n' {
 		buf.WriteByte('\n')
@@ -708,7 +682,14 @@ func (l *loggingT) printf(s severity, format string, args ...interface{}) {
 // alsoLogToStderr is true, the log message always appears on standard error; it
 // will also appear in the log file unless --logtostderr is set.
 func (l *loggingT) printWithFileLine(s severity, file string, line int, alsoToStderr bool, args ...interface{}) {
-	buf := l.formatHeader(s, file, line)
+	var buf *buffer
+
+	if s == statisLog {
+		buf = l.formatStatisHeader()
+	} else {
+		buf = l.formatHeader(s, file, line)
+	}
+
 	fmt.Fprint(buf, args...)
 	if buf.Bytes()[buf.Len()-1] != '\n' {
 		buf.WriteByte('\n')
@@ -755,7 +736,6 @@ func (l *loggingT) output(s severity, buf *buffer, file string, line int, alsoTo
 
 		case statisLog:
 			l.file[statisLog].Write(data)
-			l.file[infoLog].Write(data)
 		}
 	}
 	if s == fatalLog {
@@ -955,6 +935,52 @@ func (l *loggingT) flushAll() {
 			file.Sync()  // ignore error
 		}
 	}
+}
+
+func (l *loggingT) statisHeader(s severity, depth int) (*buffer, string, int) {
+	return l.formatStatisHeader(), "???", 1
+}
+
+func (l *loggingT) formatStatisHeader() *buffer {
+	now := timeNow()
+	buf := l.getBuffer()
+
+	// Avoid Fprintf, for speed. The format is so simple that we can do it quickly by hand.
+	// It's worth about 3X. Fprintf is hard.
+	year, month, day := now.Date()
+	hour, minute, second := now.Clock()
+	// [yyyy-mm-dd hh:mm:ss]
+	i := 0
+	buf.tmp[i] = '['
+	i += 1
+	buf.nDigits(4, i, int(year), '0')
+	i += 4
+	buf.tmp[i] = '-'
+	i += 1
+	buf.twoDigits(i, int(month))
+	i += 2
+	buf.tmp[i] = '-'
+	i += 1
+	buf.twoDigits(i, day)
+	i += 2
+	buf.tmp[i] = ' '
+	i += 1
+	buf.twoDigits(i, hour)
+	i += 2
+	buf.tmp[i] = ':'
+	i += 1
+	buf.twoDigits(i, minute)
+	i += 2
+	buf.tmp[i] = ':'
+	i += 1
+	buf.twoDigits(i, second)
+	i += 2
+	buf.tmp[i] = ']'
+	i += 1
+	buf.tmp[i] = ' '
+	i += 1
+	buf.Write(buf.tmp[:i])
+	return buf
 }
 
 // createNewFiles creates all the log files for severity from sev down to infoLog.
