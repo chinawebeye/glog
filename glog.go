@@ -99,16 +99,18 @@ type severity int32 // sync/atomic int32
 // lower-severity log file.
 const (
 	infoLog severity = iota
+	statisLog
 	warningLog
 	errorLog
 	fatalLog
-	numSeverity = 4
+	numSeverity = 5
 )
 
-const severityChar = "IWEF"
+const severityChar = "ISWEF"
 
 var severityName = []string{
 	infoLog:    "INFO",
+	statisLog:  "STATIS",
 	warningLog: "WARNING",
 	errorLog:   "ERROR",
 	fatalLog:   "FATAL",
@@ -548,6 +550,11 @@ func (l *loggingT) header(s severity, depth int) (*buffer, string, int) {
 
 // formatHeader formats a log header using the provided file name and line number.
 func (l *loggingT) formatHeader(s severity, file string, line int) *buffer {
+
+	if s == statisLog {
+		return l.formatStatisHeader()
+	}
+
 	now := timeNow()
 	if line < 0 {
 		line = 0 // not a real line number, but acceptable to someDigits
@@ -583,6 +590,48 @@ func (l *loggingT) formatHeader(s severity, file string, line int) *buffer {
 	buf.tmp[n+1] = ']'
 	buf.tmp[n+2] = ' '
 	buf.Write(buf.tmp[:n+3])
+	return buf
+}
+
+func (l *loggingT) formatStatisHeader() *buffer {
+	now := timeNow()
+	buf := l.getBuffer()
+
+	// Avoid Fprintf, for speed. The format is so simple that we can do it quickly by hand.
+	// It's worth about 3X. Fprintf is hard.
+	year, month, day := now.Date()
+	hour, minute, second := now.Clock()
+	// [yyyy-mm-dd hh:mm:ss]
+	i := 0
+	buf.tmp[i] = '['
+	i += 1
+	buf.nDigits(4, i, int(year), '0')
+	i += 4
+	buf.tmp[i] = '-'
+	i += 1
+	buf.twoDigits(i, int(month))
+	i += 2
+	buf.tmp[i] = '-'
+	i += 1
+	buf.twoDigits(i, day)
+	i += 2
+	buf.tmp[i] = ' '
+	i += 1
+	buf.twoDigits(i, hour)
+	i += 2
+	buf.tmp[i] = ':'
+	i += 1
+	buf.twoDigits(i, minute)
+	i += 2
+	buf.tmp[i] = ':'
+	i += 1
+	buf.twoDigits(i, second)
+	i += 2
+	buf.tmp[i] = ']'
+	i += 1
+	buf.tmp[i] = ' '
+	i += 1
+	buf.Write(buf.tmp[:i])
 	return buf
 }
 
@@ -702,6 +751,10 @@ func (l *loggingT) output(s severity, buf *buffer, file string, line int, alsoTo
 			l.file[warningLog].Write(data)
 			fallthrough
 		case infoLog:
+			l.file[infoLog].Write(data)
+
+		case statisLog:
+			l.file[statisLog].Write(data)
 			l.file[infoLog].Write(data)
 		}
 	}
@@ -854,7 +907,7 @@ func (sb *syncBuffer) rotateFile(now time.Time) error {
 // bufferSize sizes the buffer associated with each log file. It's large
 // so that log records can accumulate without the logging thread blocking
 // on disk I/O. The flushDaemon will block instead.
-const bufferSize = 256 * 1024
+const bufferSize = 512 * 1024
 
 // createFiles creates all the log files for severity from sev down to infoLog.
 // l.mu is held.
@@ -902,6 +955,130 @@ func (l *loggingT) flushAll() {
 			file.Sync()  // ignore error
 		}
 	}
+}
+
+// createNewFiles creates all the log files for severity from sev down to infoLog.
+// l.mu is held.
+func (l *loggingT) createNewFiles() error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if !flag.Parsed() {
+		return fmt.Errorf("ERROR: logging before flag.Parse: ")
+	} else if l.toStderr {
+		return nil
+	}
+
+	now := time.Now()
+	// Files are created in decreasing severity order, so as soon as we find one
+	// has already been created, we can stop.
+	for s := fatalLog; s >= infoLog; s-- {
+		if l.file[s] == nil {
+			continue
+		}
+
+		if sb, ok := l.file[s].(*syncBuffer); ok {
+			if err := sb.rotateFile(now); err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+
+// createNewFiles creates all the log files for severity from sev down to infoLog.
+// l.mu is held.
+func (l *loggingT) getFileNames(sev severity) []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	var filenames []string
+	for s := sev; s >= infoLog; s-- {
+		if l.file[s] != nil {
+			if v, ok := l.file[s].(*syncBuffer); ok {
+				filenames = append(filenames, v.file.Name())
+			}
+		}
+	}
+	//fmt.Printf("getFileNames filenames = %#v\n", filenames)
+	return filenames
+}
+
+func (l *loggingT) moveFiles(movedir string) error {
+	var err error
+	var filenames []string
+	var olddir string
+	var find bool
+
+	if len(movedir) < 1 {
+		return fmt.Errorf("MoveFiles movedir empty")
+	}
+
+	s := fatalLog
+
+	runfilenames := l.getFileNames(s)
+	for _, v := range runfilenames {
+		olddir = filepath.Dir(v)
+		//fmt.Printf("olddir=%v\n", olddir)
+		break
+
+	}
+	movedir = filepath.Clean(movedir)
+	if movedir, err = filepath.Abs(movedir); err != nil {
+		return err
+	}
+	//fmt.Printf("movedir=%v\n", movedir)
+
+	if movedir == olddir {
+		return fmt.Errorf("MoveFiles movedir == olddir, %v", movedir)
+	}
+
+	pattern := filepath.Base(os.Args[0]) + "." + "*.log.*-*"
+	filepath.Walk(olddir, func(path string, fi os.FileInfo, err error) error {
+		if nil == fi {
+			return err
+		}
+		if fi.IsDir() || (fi.Mode()&os.ModeSymlink) > 0 {
+			return nil
+		}
+
+		if matched, err := filepath.Match(pattern, fi.Name()); matched && err == nil {
+			name := filepath.Join(olddir, fi.Name())
+			filenames = append(filenames, name)
+		}
+
+		return nil
+	})
+	//fmt.Printf("filenames=%v\n", filenames)
+
+	if _, err = os.Stat(movedir); err != nil {
+		if err = os.MkdirAll(movedir, os.ModePerm); err != nil {
+			return err
+		}
+	}
+
+	for _, v1 := range filenames {
+		find = false
+		for _, v2 := range runfilenames {
+			if v1 == v2 {
+				//fmt.Printf("runfilenames = %v\n", v2)
+				find = true
+				break
+			}
+		}
+		if find {
+			continue
+		}
+
+		newpath := filepath.Join(movedir, filepath.Base(v1))
+		//if err = syscall.MoveFile(&StringToUTF16(v1)[0], &StringToUTF16(newpath)[0]); err != nil {
+		if err = os.Rename(v1, newpath); err != nil {
+			return err
+		}
+	}
+
+	return err
 }
 
 // CopyStandardLogTo arranges for messages written to the Go "log" package's
@@ -1073,6 +1250,30 @@ func Infof(format string, args ...interface{}) {
 	logging.printf(infoLog, format, args...)
 }
 
+// Statis logs to the STATIS log.
+// Arguments are handled in the manner of fmt.Print; a newline is appended if missing.
+func Statis(args ...interface{}) {
+	logging.print(statisLog, args...)
+}
+
+// StatisDepth acts as Info but uses depth to determine which call frame to log.
+// StatisDepth(0, "msg") is the same as Info("msg").
+func StatisDepth(depth int, args ...interface{}) {
+	logging.printDepth(statisLog, depth, args...)
+}
+
+// Statisln logs to the STATIS log.
+// Arguments are handled in the manner of fmt.Println; a newline is appended if missing.
+func Statisln(args ...interface{}) {
+	logging.println(statisLog, args...)
+}
+
+// Statisf logs to the STATIS log.
+// Arguments are handled in the manner of fmt.Printf; a newline is appended if missing.
+func Statisf(format string, args ...interface{}) {
+	logging.printf(statisLog, format, args...)
+}
+
 // Warning logs to the WARNING and INFO logs.
 // Arguments are handled in the manner of fmt.Print; a newline is appended if missing.
 func Warning(args ...interface{}) {
@@ -1177,4 +1378,31 @@ func Exitln(args ...interface{}) {
 func Exitf(format string, args ...interface{}) {
 	atomic.StoreUint32(&fatalNoStacks, 1)
 	logging.printf(fatalLog, format, args...)
+}
+
+func MoveFiles() error {
+	var err error
+	onceLogMoveDirs.Do(createLogMoveDirs)
+	for _, movedir := range logMoveDirs {
+		err = logging.moveFiles(movedir)
+		if err == nil {
+			break
+		}
+	}
+
+	return err
+}
+
+func MoveAndCreateNewFiles() error {
+	var err error
+
+	if err = logging.createNewFiles(); err != nil {
+		return err
+	}
+
+	if err = MoveFiles(); err != nil {
+		return err
+	}
+
+	return err
 }

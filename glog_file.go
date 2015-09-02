@@ -47,6 +47,20 @@ func createLogDirs() {
 	logDirs = append(logDirs, os.TempDir())
 }
 
+// logMoveDirs lists the candidate directories for move log files.
+var logMoveDirs []string
+
+// If non-empty, log files will move to this directory, no support cross-device link!!!
+// See createLogMoveDirs for the full list of possible destinations.
+var logMoveDir = flag.String("log_move_dir", "", "If empty,  directory  is '<program>_logmove'. If non-empty, log files will move to this directory, no support cross-device link!!!")
+
+func createLogMoveDirs() {
+	if *logMoveDir != "" {
+		logMoveDirs = append(logMoveDirs, *logMoveDir)
+	}
+	logMoveDirs = append(logMoveDirs, filepath.Join(os.TempDir(), program+"_logmove"))
+}
+
 var (
 	pid      = os.Getpid()
 	program  = filepath.Base(os.Args[0])
@@ -97,6 +111,7 @@ func logName(tag string, t time.Time) (name, link string) {
 }
 
 var onceLogDirs sync.Once
+var onceLogMoveDirs sync.Once
 
 // create creates a new log file and returns the file and its filename, which
 // contains tag ("INFO", "FATAL", etc.) and t.  If the file is created
@@ -110,6 +125,10 @@ func create(tag string, t time.Time) (f *os.File, filename string, err error) {
 	name, link := logName(tag, t)
 	var lastErr error
 	for _, dir := range logDirs {
+		if _, err := os.Stat(dir); err != nil {
+			os.MkdirAll(dir, os.ModePerm)
+		}
+
 		fname := filepath.Join(dir, name)
 		f, err := os.Create(fname)
 		if err == nil {
@@ -117,6 +136,8 @@ func create(tag string, t time.Time) (f *os.File, filename string, err error) {
 			os.Remove(symlink)        // ignore err
 			os.Symlink(name, symlink) // ignore err
 			return f, fname, nil
+		} else {
+			fmt.Printf("Create err =%v\n", err)
 		}
 		lastErr = err
 	}
